@@ -17,6 +17,7 @@ PROMPT = ': '
 
 DEFAULT_SIZE = (300, 180)
 ASPECT_RATIO = 3 / 5
+ZOOM_RATIO = 1.2
 
 BOND_TYPES = {
     '-': Chem.BondType.SINGLE,
@@ -26,38 +27,52 @@ BOND_TYPES = {
 }
 
 HELP = """\
-Comands:
+Comands
+=======
 
 Quit:
-    quit
-    q
+    quit # or q, or EOF (e.g., Ctrl-D)
 
 Add a SMILES:
     CCO
+
+Print the current SMILES:
+    print  # or p
+
+Atom-based editing commands
+---------------------------
+
+These act on one or more starting atoms, specified as a comma-separated list.
 
 Add or modify a bond:
     1-2
     1=2
     1#2
+    1,2-3  # Form/modify 1-3 and 2-3 bonds
 
 Append or insert a chain:
     1-CCO
     1-CC=2
-Chain can be any SMILES, but is always attached via the first, and optionally
-via the last, atom(s).
+    2,4,6-Cl  # Append to multiple atoms at once
 
-Append to multiple atoms at once:
-    2,4,6-Cl
+Attached via the first, and optionally via the last, atom(s) in the SMILES.
 
 Modify charge on an atom:
     7+
     13-
+    5,7+  # Increase charge on two atoms at once
 
 Change element:
-    42N
+    4N
+    4,6O  # Turn two atoms into oxygen
+
+Specify isotope:
+    3i13  # Set atom 3 to mass number 13
+    3i0   # "Isotope zero" means unspecified
 
 Delete atom:
     1d
+    1,3,5d  # Delete three atoms
 
 Delete bond:
     1d2
@@ -66,102 +81,82 @@ Delete fragment:
     1D  # All atoms reachable from atom 1
 
 Display the molecule without atom indices:
-    display
-    d
+    display  # or d
 
 Undo:
-    undo
-    u
+    undo  # or u
 
 Change display size:
-    size 300, 200
-    size 300  # Y size is proportional to X
+    size 300, 200  # X, Y
+    size 300       # Y size is derived from X
+    size +         # Zoom in
+    size -         # Zoom out
+
+Write the command history from this session:
+    write-history hist.txt
 """
 
 
 def edit_bond(mol, a1, b, a2):
-    new_mol = Chem.RWMol(mol)
-    a1 = int(a1) - 1
     a2 = int(a2) - 1
     bond_type = BOND_TYPES[b]
-    if bond := new_mol.GetBondBetweenAtoms(a1, a2):
+    if bond := mol.GetBondBetweenAtoms(a1, a2):
         if bond_type is None:
-            new_mol.RemoveBond(a1, a2)
+            mol.RemoveBond(a1, a2)
         else:
             bond.SetBondType(bond_type)
+    elif bond_type is not None:
+        mol.AddBond(a1, a2, bond_type)
     else:
-        new_mol.AddBond(a1, a2, bond_type)
-    return new_mol
+        raise ValueError(f"Can't delete non-existent bond {a1+1}-{a2+1}")
 
 
 def add_chain(mol, a1, b1, smiles, b2=None, a2=None):
     frag = Chem.MolFromSmiles(smiles)
     if frag is None:
-        return None
+        raise ValueError(f"Invalid SMILES: {smiles}")
 
-    new_mol = Chem.RWMol(mol)
-    a1 = int(a1) - 1
-
-    n = new_mol.GetNumAtoms()
-    new_mol.InsertMol(frag)
-    new_mol.AddBond(a1, n, BOND_TYPES[b1])
+    n = mol.GetNumAtoms()
+    mol.InsertMol(frag)
+    mol.AddBond(a1, n, BOND_TYPES[b1])
 
     if a2 is not None:
         a2 = int(a2) - 1
-        m = new_mol.GetNumAtoms() - 1
-        new_mol.AddBond(a2, m, BOND_TYPES[b2])
-
-    return new_mol
-
-
-def multi_add_chain(mol, csv_atoms, b1, smiles):
-    frag = Chem.MolFromSmiles(smiles)
-    if frag is None:
-        return None
-    atom_idcs = [int(a) - 1 for a in csv_atoms.split(',')]
-
-    new_mol = Chem.RWMol(mol)
-    for atom_idx in atom_idcs:
-        n = new_mol.GetNumAtoms()
-        new_mol.InsertMol(frag)
-        new_mol.AddBond(atom_idx, n, BOND_TYPES[b1])
-    return new_mol
+        m = mol.GetNumAtoms() - 1
+        mol.AddBond(a2, m, BOND_TYPES[b2])
 
 
 def change_symbol(mol, a, symbol):
-    new_mol = Chem.RWMol(mol)
-    atom = new_mol.GetAtomWithIdx(int(a) - 1)
+    atom = mol.GetAtomWithIdx(a)
     atomic_num = Chem.GetPeriodicTable().GetAtomicNumber(symbol)
     atom.SetAtomicNum(atomic_num)
-    return new_mol
 
 
 def adjust_charge(mol, a, sign):
-    new_mol = Chem.RWMol(mol)
-    atom = new_mol.GetAtomWithIdx(int(a) - 1)
+    atom = mol.GetAtomWithIdx(a)
     q = atom.GetFormalCharge()
     new_q = q + 1 if sign == '+' else q - 1
     atom.SetFormalCharge(new_q)
-    return new_mol
 
 
 def delete_atom(mol, a):
-    new_mol = Chem.RWMol(mol)
-    new_mol.RemoveAtom(int(a) - 1)
-    return new_mol
+    mol.RemoveAtom(a)
+
+
+def set_isotope(mol, a, isotope):
+    atom = mol.GetAtomWithIdx(a)
+    atom.SetIsotope(int(isotope))
 
 
 def delete_fragment(mol, a):
-    start_atom_idx = int(a) - 1
+    start_atom_idx = a
     queue = [start_atom_idx]
     visited = {start_atom_idx}
 
-    new_mol = Chem.RWMol(mol)
-    new_mol.BeginBatchEdit()
     while queue:
         atom_idx = queue.pop(0)
-        new_mol.RemoveAtom(atom_idx)
-        atom = new_mol.GetAtomWithIdx(atom_idx)
+        mol.RemoveAtom(atom_idx)
+        atom = mol.GetAtomWithIdx(atom_idx)
 
         for neighbor in atom.GetNeighbors():
             neighbor_idx = neighbor.GetIdx()
@@ -169,32 +164,48 @@ def delete_fragment(mol, a):
                 visited.add(neighbor_idx)
                 queue.append(neighbor_idx)
 
-    new_mol.CommitBatchEdit()
-    return new_mol
+
+def edit_atom_list(mol, atom_idcs, cmd_tail):
+    cmds = [
+        # (regex, func)
+        (r'([-=#d])(\d+)$', edit_bond),
+        (r'([-=#])(.+?)(?:([-=#])(\d+))?$', add_chain),
+        (r'd$', delete_atom),
+        (r'D$', delete_fragment),
+        (r'([A-Z][a-z]?)$', change_symbol),
+        (r'([+-])$', adjust_charge),
+        (r'i(\d+)$', set_isotope),
+    ]
+
+    for regex, func in cmds:
+        if match := re.match(regex, cmd_tail):
+            new_mol = Chem.RWMol(mol)
+            new_mol.BeginBatchEdit()
+            for atom_idx in atom_idcs:
+                func(new_mol, atom_idx, *match.groups())
+            new_mol.CommitBatchEdit()
+            return new_mol
+    else:
+        print("?")
+        return None
 
 
 def edit_mol(mol, cmd):
     if frag := Chem.MolFromSmiles(cmd):
+        # Append a SMILES without connecting it to anything
         new_mol = Chem.RWMol(mol)
         new_mol.InsertMol(frag)
         return new_mol
-    elif match := re.match(r'(\d+)([-=#d])(\d+)$', cmd):
-        return edit_bond(mol, *match.groups())
-    elif match := re.match(r'(\d+)([-=#])(.+?)(?:([-=#])(\d+))?$', cmd):
-        return add_chain(mol, *match.groups())
-    elif match := re.match(r'(\d+(?:,\d+)+)([-=#])(.+?)$', cmd):
-        return multi_add_chain(mol, *match.groups())
-    elif match := re.match(r'(\d+)d$', cmd):
-        return delete_atom(mol, *match.groups())
-    elif match := re.match(r'(\d+)D$', cmd):
-        return delete_fragment(mol, *match.groups())
-    elif match := re.match(r'(\d+)([A-Z][a-z]?)$', cmd):
-        return change_symbol(mol, *match.groups())
-    elif match := re.match(r'(\d+)([+-])$', cmd):
-        return adjust_charge(mol, *match.groups())
-    else:
-        print("?")
-        return None
+
+    # The remaining commands all start with a list of atoms:
+    if match := re.match(r'(\d+(?:,\d+)*)', cmd):
+        csv_atoms = match.group(1)
+        atom_idcs = [int(a) - 1 for a in csv_atoms.split(',')]
+        cmd_tail = cmd[len(csv_atoms):]
+        return edit_atom_list(mol, atom_idcs, cmd_tail)
+
+    print("?")
+    return None
 
 
 def get_display_mol(mol):
@@ -204,14 +215,26 @@ def get_display_mol(mol):
     return new_mol
 
 
-def parse_size(cmd):
-    toks = cmd.split()
-    x = int(toks[1])
-    if len(toks) > 2:
-        y = int(toks[2])
-    else:
-        y = int(x * ASPECT_RATIO)
-    return x, y
+def parse_size(cmd, size):
+    try:
+        toks = cmd.split()
+        if toks[1] == '+':
+            x = int(size[0] * ZOOM_RATIO)
+            y = int(size[1] * ZOOM_RATIO)
+        elif toks[1] == '-':
+            x = int(size[0] / ZOOM_RATIO)
+            y = int(size[1] / ZOOM_RATIO)
+        else:
+            x = int(toks[1])
+            if len(toks) > 2:
+                y = int(toks[2])
+            else:
+                aspect_ratio = size[1] / size[0]
+                y = int(x * aspect_ratio)
+        return x, y
+    except Exception as e:
+        print(f'Invalid size command: {cmd}')
+        return size
 
 
 def main():
@@ -230,6 +253,7 @@ def main():
             break
 
         history.append(cmd)
+        cmd = re.sub(r'(^|\s+)#.*', '', cmd)
 
         if cmd in ('q', 'quit'):
             break
@@ -242,7 +266,8 @@ def main():
                 mol = stack.pop()
                 draw = True
         elif cmd.startswith('size'):
-            size = parse_size(cmd)
+            size = parse_size(cmd, size)
+            print(f'{size=}')
             draw = True
         elif cmd in ('d', 'display'):
             molcat.show_mol(get_display_mol(mol), size)
@@ -260,7 +285,7 @@ def main():
                 print(e)
                 continue
         else:
-            print('?')
+            pass  # Empty command
 
         if draw and mol.GetNumAtoms() > 0:
             molcat.show_mol(mol, size)
