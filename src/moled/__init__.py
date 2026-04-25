@@ -22,8 +22,17 @@ ZOOM_RATIO = 1.2
 BOND_TYPES = {
     '-': Chem.BondType.SINGLE,
     '=': Chem.BondType.DOUBLE,
+    'z': Chem.BondType.DOUBLE,
+    'e': Chem.BondType.DOUBLE,
     '#': Chem.BondType.TRIPLE,
     'd': None,
+}
+
+BOND_STEREO = {
+    '//': Chem.BondStereo.STEREOTRANS,
+    '\\\\': Chem.BondStereo.STEREOTRANS,
+    '/\\': Chem.BondStereo.STEREOCIS,
+    '\\/': Chem.BondStereo.STEREOCIS,
 }
 
 HELP = """\
@@ -49,6 +58,10 @@ Add or modify a bond:
     1=2
     1#2
     1,2-3  # Form/modify 1-3 and 2-3 bonds
+
+Define cis/trans double bond:
+    1/2=3/4
+    1/2=3\\4
 
 Append or insert a chain:
     1-CCO
@@ -100,15 +113,29 @@ Write the command history from this session:
 def edit_bond(mol, a1, b, a2):
     a2 = int(a2) - 1
     bond_type = BOND_TYPES[b]
-    if bond := mol.GetBondBetweenAtoms(a1, a2):
-        if bond_type is None:
-            mol.RemoveBond(a1, a2)
-        else:
-            bond.SetBondType(bond_type)
-    elif bond_type is not None:
-        mol.AddBond(a1, a2, bond_type)
-    else:
+    if mol.GetBondBetweenAtoms(a1, a2):
+        # Remove bond if it already exists to clear any lingering stereo.
+        mol.RemoveBond(a1, a2)
+        mol.CommitBatchEdit()
+    elif bond_type is None:
         raise ValueError(f"Can't delete non-existent bond {a1+1}-{a2+1}")
+    if bond_type is not None:
+        mol.AddBond(a1, a2, bond_type)
+
+
+def edit_cis_trans(mol, a1, dir1, a2, a3, dir2, a4):
+    a2 = int(a2) - 1
+    a3 = int(a3) - 1
+    a4 = int(a4) - 1
+    bond = mol.GetBondBetweenAtoms(a2, a3)
+    if not bond:
+        mol.AddBond(a2, a3, Chem.BondType.DOUBLE)
+        bond = mol.GetBondBetweenAtoms(a2, a3)
+    else:
+        bond.SetBondType(Chem.BondType.DOUBLE)
+    stereo = BOND_STEREO[dir1 + dir2]
+    bond.SetStereoAtoms(a1, a4)
+    bond.SetStereo(stereo)
 
 
 def add_chain(mol, a1, b1, smiles, b2=None, a2=None):
@@ -166,6 +193,10 @@ def delete_fragment(mol, a):
 
 
 def edit_atom_list(mol, atom_idcs, cmd_tail):
+    """
+    Process an atom-list-based command. For each atom in list, apply the action
+    defined by cmd_tail.
+    """
     cmds = [
         # (regex, func)
         (r'([-=#d])(\d+)$', edit_bond),
@@ -175,6 +206,7 @@ def edit_atom_list(mol, atom_idcs, cmd_tail):
         (r'([A-Z][a-z]?)$', change_symbol),
         (r'([+-])$', adjust_charge),
         (r'i(\d+)$', set_isotope),
+        (r'([/\\])(\d+)=(\d+)([/\\])(\d+)$', edit_cis_trans),
     ]
 
     for regex, func in cmds:
@@ -232,7 +264,7 @@ def parse_size(cmd, size):
                 aspect_ratio = size[1] / size[0]
                 y = int(x * aspect_ratio)
         return x, y
-    except Exception as e:
+    except Exception:
         print(f'Invalid size command: {cmd}')
         return size
 
@@ -279,7 +311,7 @@ def main():
             try:
                 if new_mol := edit_mol(mol, cmd):
                     stack.append(mol)
-                    mol = molcat.to_2d(new_mol, idx=1)
+                    mol = molcat.to_2d(new_mol, idx=1, cleanIt=False)
                     draw = True
             except Exception as e:
                 print(e)
