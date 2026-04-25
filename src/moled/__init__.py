@@ -2,9 +2,14 @@
 moled - moled is the standard molecular editor
 """
 
+import argparse
+import gzip
 import logging
+import os
 import re
 import readline  # noqa: F401
+import sys
+from dataclasses import dataclass
 
 import molcat
 from rdkit import Chem
@@ -46,7 +51,7 @@ Add a SMILES:
     CCO
 
 Print the current SMILES:
-    print  # or p
+    print  # or s
 
 Atom-based editing commands
 ---------------------------
@@ -94,10 +99,31 @@ Delete fragment:
     1D  # All atoms reachable from atom 1
 
 Display the molecule without atom indices:
-    display  # or d
+    display noidx # or d noidx
 
 Undo:
     undo  # or u
+
+File and entry commands
+-----------------------
+
+Read a file:
+    read myfile.sdf  # or r. Also supports .smi, .csv, .mae[gz].
+
+Write a file:
+    write myfile.sdf  # or w. Same formats as above.
+
+Go to next/prev/any structure:
+    next  # or n
+    prep  # or :p
+    42    # jump directly to 42nd structure (counting from 1)
+    last  # or $. Jump to last structure.
+
+List all entries in the file (SMILES and title):
+    ls
+
+Miscellaneous
+-------------
 
 Change display size:
     size 300, 200  # X, Y
@@ -108,6 +134,51 @@ Change display size:
 Write the command history from this session:
     write-history hist.txt
 """
+
+
+@dataclass
+class State:
+    mols: list[Chem.Mol]
+    pos: int
+
+    def __len__(self):
+        return len(self.mols)
+
+    @property
+    def mol(self):
+        return self.mols[self.pos]
+
+    def next(self):
+        if self.pos < len(self) - 1:
+            self.pos += 1
+        else:
+            raise IndexError("End of file")
+
+    def prev(self):
+        if self.pos > 0:
+            self.pos -= 1
+        else:
+            raise IndexError("Beginning of file")
+
+    def last(self):
+        self.pos = len(self) - 1
+
+    def goto(self, new_pos):
+        if new_pos in range(len(self)):
+            self.pos = new_pos
+        else:
+            raise IndexError("Out of range")
+
+    def insertMol(self, new_mol) -> 'State':
+        new_mols = self.mols[:]
+        new_pos = self.pos + 1
+        new_mols.insert(new_pos, new_mol)
+        return State(new_mols, new_pos)
+
+    def updateMol(self, new_mol) -> 'State':
+        new_mols = self.mols[:]
+        new_mols[self.pos] = new_mol
+        return State(new_mols, self.pos)
 
 
 def edit_bond(mol, a1, b, a2):
@@ -236,8 +307,13 @@ def edit_mol(mol, cmd):
         cmd_tail = cmd[len(csv_atoms):]
         return edit_atom_list(mol, atom_idcs, cmd_tail)
 
-    print("?")
     return None
+
+
+def rename_mol(mol, title):
+    new_mol = Chem.Mol(mol)
+    new_mol.SetProp('_Name', title)
+    return new_mol
 
 
 def get_display_mol(mol):
@@ -269,57 +345,182 @@ def parse_size(cmd, size):
         return size
 
 
-def main():
-    rdkit_logger.setLevel(logging.FATAL)
-    Chem.rdBase.LogToPythonLogger()
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('file_or_smiles', nargs='?')
+    args = parser.parse_args(argv)
+    return args
 
-    mol = Chem.Mol()
-    stack = [mol]
+
+def to_smiles(mol) -> str:
+    Chem.SanitizeMol(mol)
+    return Chem.MolToSmiles(mol)
+
+
+def print_mols(mols, pos):
+    for i, mol in enumerate(mols):
+        toks = [f'{i + 1}:', to_smiles(mol)]
+        try:
+            toks.append(mol.GetProp('_Name'))
+        except KeyError:
+            pass
+        if i == pos:
+            sys.stdout.write('\033[35m')
+        print(' '.join(toks))
+        sys.stdout.write('\033[0m')
+
+
+def get_writer(filename):
+    """
+    Return a Mol supplier for the given filename.
+    """
+    if filename.endswith('.smi'):
+        return Chem.SmilesWriter(filename, includeHeader=False)
+    elif filename.endswith('.csv'):
+        return Chem.SmilesWriter(filename, delimiter=',')
+    elif filename.endswith('.sdf') or filename.endswith('.mol'):
+        return Chem.SDWriter(filename)
+    elif filename.endswith('.mae'):
+        return Chem.MaeWriter(filename)
+    elif filename.endswith('.maegz') or filename.endswith('.mae.gz'):
+        return Chem.MaeWriter(gzip.open(filename, 'w'))
+    else:
+        raise ValueError(f'Unknown file format for {filename}')
+
+
+def write_mols(filename, mols):
+    with get_writer(filename) as writer:
+        for mol in mols:
+            writer.write(mol)
+
+
+def main_loop(input_mols=None, filename=None):
+    stack = [State(input_mols or [], 0)]
     history = []
     size = DEFAULT_SIZE
+    draw = True
+
     while True:
-        draw = False
+        state = stack[-1]
+        mol = state.mol
+        if draw and mol.GetNumAtoms() > 0:
+            molcat.show_mol(mol, size)
+        draw = True
+
         try:
-            cmd = input(PROMPT)
+            cmd = input(PROMPT).strip()
         except EOFError:
             break
 
         history.append(cmd)
         cmd = re.sub(r'(^|\s+)#.*', '', cmd)
+        word, *rest = cmd.split(' ', 1)
+        if rest:
+            rest = rest[0]
 
-        if cmd in ('q', 'quit'):
-            break
-        elif cmd in ('h', 'help', '?'):
-            print(HELP)
-        elif cmd in ('p', 'print'):
-            print(Chem.MolToSmiles(mol))
-        elif cmd in ('u', 'undo'):
-            if stack:
-                mol = stack.pop()
-                draw = True
-        elif cmd.startswith('size'):
-            size = parse_size(cmd, size)
-            print(f'{size=}')
-            draw = True
-        elif cmd in ('d', 'display'):
-            molcat.show_mol(get_display_mol(mol), size)
-        elif cmd.startswith('write-history'):
-            _, fname = cmd.split()
-            with open(fname, 'w') as fh:
-                fh.write('\n'.join(history) + '\n')
-        elif cmd:
-            try:
+        try:
+            if cmd in ('q', 'quit'):
+                break
+            elif cmd in ('h', 'help', '?'):
+                print(HELP)
+                draw = False
+            elif cmd in ('s', 'smiles'):
+                print(to_smiles(mol))
+                draw = False
+            elif cmd in ('ls'):
+                print_mols(state.mols, state.pos)
+                draw = False
+            elif cmd in ('n', 'next'):
+                state.next()
+            elif cmd in ('p', 'prev'):
+                state.prev()
+            elif cmd in ('$', 'last'):
+                state.last()
+            elif re.match(r'\d+$', cmd):
+                new_pos = int(cmd) - 1
+                state.goto(new_pos)
+            elif cmd in ('new'):
+                new_state = state.insertMol(Chem.Mol())
+                stack.append(new_state)
+            elif word == 'dup':
+                if rest:
+                    idx = int(rest) - 1
+                    new_mol = Chem.Mol(state.mols[idx])
+                else:
+                    new_mol = Chem.Mol(state.mol)
+                new_state = state.insertMol(new_mol)
+                stack.append(new_state)
+            elif word in ('r', 'read'):  # read file
+                fname = rest or filename
+                new_mols = get_mols(fname)
+                stack.append(State(new_mols, 0))
+            elif word in ('w', 'write'):  # write file
+                fname = rest or filename
+                write_mols(fname, state.mols)
+                print(f'Wrote {len(state)} mols to {fname}')
+                draw = False
+            elif cmd in ('u', 'undo'):
+                if len(stack) > 1:
+                    state = stack.pop()
+                    new_pos = stack[-1].pos
+                    if new_pos != state.pos:
+                        print(f'Moved back to mol {new_pos + 1}')
+                else:
+                    draw = False
+            elif word == 'size':
+                size = parse_size(cmd, size)
+                print(f'{size=}')
+            elif cmd in ('cp', 'copy'):
+                molcat.copy_mol(mol, size)
+                draw = False
+            elif word in ('d', 'display'):
+                if rest == 'noidx':
+                    molcat.show_mol(get_display_mol(mol), size)
+                    draw = False
+            elif cmd.startswith('write-history'):
+                _, fname = cmd.split()
+                with open(fname, 'w') as fh:
+                    fh.write('\n'.join(history) + '\n')
+                draw = False
+            elif word in ('t', 'title'):
+                new_mol = rename_mol(mol, rest)
+                new_state = state.updateMol(new_mol)
+                stack.append(new_state)
+                draw = False
+            elif cmd:
                 if new_mol := edit_mol(mol, cmd):
-                    stack.append(mol)
-                    mol = molcat.to_2d(new_mol, idx=1, cleanIt=False)
-                    draw = True
-            except Exception as e:
-                print(e)
-                continue
-        else:
-            pass  # Empty command
-
-        if draw and mol.GetNumAtoms() > 0:
-            molcat.show_mol(mol, size)
+                    new_mol = molcat.to_2d(new_mol, idx=1, cleanIt=False)
+                    new_state = state.updateMol(new_mol)
+                    stack.append(new_state)
+                else:
+                    print("?")
+                    draw = False
+            else:
+                draw = False  # Empty command
+        except Exception as e:
+            print(e)
+            draw = False
     print()
-    print(Chem.MolToSmiles(mol))
+    print(to_smiles(mol))
+
+
+def get_mols(file_or_smiles):
+    if file_or_smiles:
+        if os.path.isfile(file_or_smiles):
+            return [
+                molcat.to_2d(mol, idx=1, cleanIt=False)
+                for mol in molcat.get_reader(file_or_smiles, removeHs=True)
+            ]
+        else:
+            return [Chem.MolFromSmiles(file_or_smiles)]
+    else:
+        return [Chem.Mol()]
+
+
+def main():
+    rdkit_logger.setLevel(logging.FATAL)
+    Chem.rdBase.LogToPythonLogger()
+    args = parse_args()
+
+    mols = get_mols(args.file_or_smiles)
+    main_loop(mols, args.file_or_smiles)
