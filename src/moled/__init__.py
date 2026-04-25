@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import molcat
 from rdkit import Chem
+from rdkit.Chem import Draw
 
 __version__ = '0.1.0'
 
@@ -47,7 +48,7 @@ Comands
 Quit:
     quit # or q, or EOF (e.g., Ctrl-D)
 
-Add a SMILES:
+Add a SMILES to the current entry:
     CCO
 
 Print the current SMILES:
@@ -121,6 +122,24 @@ Go to next/prev/any structure:
 
 List all entries in the file (SMILES and title):
     ls
+
+Range commands
+--------------
+
+These act in multiple entries at once. They all start with a colon.
+A range can be defined by one or two addresses, or '%' to mean all.
+The current entry is '.', and relative offsets may be specified
+with '+' or '-'.
+
+    :%p    # print all entries
+    :%t    # show all thumbnails
+    :%d    # delete all
+    :3d    # delete entry 3
+    :2,4d  # delete 2-4, inclusive
+    :2,$d  # delete 2 to EOF
+    :.d    # delete current entry
+    :.,+3  # print current entry and the next three
+    :-1,+1 # print prev, current, and next
 
 Miscellaneous
 -------------
@@ -316,6 +335,61 @@ def rename_mol(mol, title):
     return new_mol
 
 
+def parse_addr(s, state):
+    match = re.match(r'(\.|[+-]?\d+|\$)', s)
+    if not match:
+        raise ValueError('?')
+    start_str = match.group(1)
+    if start_str == '.':
+        start = state.pos
+    elif start_str == '$':
+        start = len(state) - 1
+    elif start_str[0] in '+-':
+        start = state.pos + int(start_str)
+    else:
+        start = int(start_str) - 1
+    return start, s[len(start_str):]
+
+
+def range_cmd(cmd, state):
+    tail = cmd[1:]
+    if tail.startswith('%'):
+        start = 0
+        stop = len(state)
+        tail = tail[1:]
+    else:
+        start, tail = parse_addr(tail, state)
+        if tail.startswith(','):
+            stop, tail = parse_addr(tail[1:], state)
+        else:
+            stop = start
+    stop += 1  # To use Python range/slicing convention
+
+    if tail == 'd':
+        new_mols = state.mols[:]
+        del new_mols[start:stop]
+        if not new_mols:
+            new_mols.append(Chem.Mol())
+        print(f'Deleted {stop - start} mols.')
+
+        if state.pos < start:
+            new_pos = state.pos
+        elif stop <= state.pos:
+            new_pos = state.pos - stop + start
+        else:
+            new_pos = max(0, start - 1)
+            print(
+                f'Moved to mol {new_pos + 1} because current mol was deleted.')
+        return State(new_mols, new_pos)
+    elif tail == 'p':
+        print_mols(state.mols, state.pos, start, stop)
+    elif tail == 't':
+        show_thumbnails(state.mols, start, stop)
+    else:
+        raise ValueError('?')
+    return None
+
+
 def get_display_mol(mol):
     new_mol = Chem.Mol(mol)
     for atom in new_mol.GetAtoms():
@@ -357,8 +431,10 @@ def to_smiles(mol) -> str:
     return Chem.MolToSmiles(mol)
 
 
-def print_mols(mols, pos):
-    for i, mol in enumerate(mols):
+def print_mols(mols, pos, start=None, stop=None):
+    start = start or 0
+    stop = stop or len(mols)
+    for i, mol in enumerate(mols[start:stop], start):
         toks = [f'{i + 1}:', to_smiles(mol)]
         try:
             toks.append(mol.GetProp('_Name'))
@@ -368,6 +444,18 @@ def print_mols(mols, pos):
             sys.stdout.write('\033[35m')
         print(' '.join(toks))
         sys.stdout.write('\033[0m')
+
+
+def show_thumbnails(mols, start=None, stop=None):
+    start = start or 0
+    stop = stop or len(mols)
+    legends = [str(i + 1) for i in range(start, stop or len(mols))]
+    png_data = Draw.MolsToGridImage(mols[start:stop],
+                                    returnPNG=True,
+                                    molsPerRow=5,
+                                    subImgSize=(200, 150),
+                                    legends=legends)
+    molcat.show_image(png_data)
 
 
 def get_writer(filename):
@@ -482,11 +570,19 @@ def main_loop(input_mols=None, filename=None):
                 with open(fname, 'w') as fh:
                     fh.write('\n'.join(history) + '\n')
                 draw = False
-            elif word in ('t', 'title'):
+            elif word in ('title'):
                 new_mol = rename_mol(mol, rest)
                 new_state = state.updateMol(new_mol)
                 stack.append(new_state)
                 draw = False
+            elif word.startswith('th'):
+                show_thumbnails(state.mols)
+                draw = False
+            elif cmd.startswith(':'):
+                if new_state := range_cmd(cmd, state):
+                    stack.append(new_state)
+                else:
+                    draw = False
             elif cmd:
                 if new_mol := edit_mol(mol, cmd):
                     new_mol = molcat.to_2d(new_mol, idx=1, cleanIt=False)
