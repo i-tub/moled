@@ -3,12 +3,14 @@ moled - moled is the standard molecular editor
 """
 
 import argparse
+import ast
 import gzip
 import logging
 import os
 import re
 import readline  # noqa: F401
 import sys
+import tomllib
 from dataclasses import dataclass
 
 import molcat
@@ -31,7 +33,7 @@ BOND_TYPES = {
     'z': Chem.BondType.DOUBLE,
     'e': Chem.BondType.DOUBLE,
     '#': Chem.BondType.TRIPLE,
-    'd': None,
+    '.': None,
 }
 
 BOND_STEREO = {
@@ -54,6 +56,13 @@ Add a SMILES to the current entry:
 Print the current SMILES:
     print  # or s
 
+Display the molecule, optionally without atom indices:
+    display       # or d
+    display noidx # or d noidx
+
+Undo:
+    undo  # or u
+
 Atom-based editing commands
 ---------------------------
 
@@ -64,6 +73,7 @@ Add or modify a bond:
     1=2
     1#2
     1,2-3  # Form/modify 1-3 and 2-3 bonds
+    1.2    # Deletes the bond
 
 Define cis/trans double bond:
     1/2=3/4
@@ -93,17 +103,8 @@ Delete atom:
     1d
     1,3,5d  # Delete three atoms
 
-Delete bond:
-    1d2
-
 Delete fragment:
     1D  # All atoms reachable from atom 1
-
-Display the molecule without atom indices:
-    display noidx # or d noidx
-
-Undo:
-    undo  # or u
 
 File and entry commands
 -----------------------
@@ -131,15 +132,32 @@ A range can be defined by one or two addresses, or '%' to mean all.
 The current entry is '.', and relative offsets may be specified
 with '+' or '-'.
 
-    :%p    # print all entries
-    :%t    # show all thumbnails
-    :%d    # delete all
-    :3d    # delete entry 3
-    :2,4d  # delete 2-4, inclusive
-    :2,$d  # delete 2 to EOF
-    :.d    # delete current entry
-    :.,+3  # print current entry and the next three
-    :-1,+1 # print prev, current, and next
+    :%p       # print all entries (equivalent to ls)
+    :%t       # show all thumbnails
+    :%d       # delete all
+    :%w x.smi # write all to x.smi
+    :3d       # delete entry 3
+    :2,4d     # delete 2-4, inclusive
+    :2,$d     # delete 2 to EOF
+    :.d       # delete current entry
+    :.w x.smi # write current entry to x.smi
+    :.,+3     # print current entry and the next three
+    :-1,+1    # print prev, current, and next
+
+Molecule properties
+-------------------
+
+Print a table with all properties:
+    props
+
+Set a property
+    set foo=42
+    set bar="my value"  # string values must be quoted
+    set "my prop"=3.14  # names must be quoted if they are not "words"
+
+Unset a property
+    unset foo
+    unset "my prop"
 
 Miscellaneous
 -------------
@@ -147,8 +165,8 @@ Miscellaneous
 Change display size:
     size 300, 200  # X, Y
     size 300       # Y size is derived from X
-    size +         # Zoom in
-    size -         # Zoom out
+    size +         # Zoom in 20%
+    size -         # Zoom out 20%
 
 Write the command history from this session:
     write-history hist.txt
@@ -289,7 +307,7 @@ def edit_atom_list(mol, atom_idcs, cmd_tail):
     """
     cmds = [
         # (regex, func)
-        (r'([-=#d])(\d+)$', edit_bond),
+        (r'([-=#.])(\d+)$', edit_bond),
         (r'([-=#])(.+?)(?:([-=#])(\d+))?$', add_chain),
         (r'd$', delete_atom),
         (r'D$', delete_fragment),
@@ -385,6 +403,12 @@ def range_cmd(cmd, state):
         print_mols(state.mols, state.pos, start, stop)
     elif tail == 't':
         show_thumbnails(state.mols, start, stop)
+    elif tail.startswith('w '):
+        try:
+            _, fname = tail.split(' ', 1)
+        except ValueError:
+            raise ValueError(':w must specify filenema')
+        write_mols(fname, state.mols[start:stop])
     else:
         raise ValueError('?')
     return None
@@ -446,6 +470,10 @@ def print_mols(mols, pos, start=None, stop=None):
         sys.stdout.write('\033[0m')
 
 
+def print_pos(state):
+    print_mols(state.mols, state.pos, state.pos, state.pos + 1)
+
+
 def show_thumbnails(mols, start=None, stop=None):
     start = start or 0
     stop = stop or len(mols)
@@ -456,6 +484,43 @@ def show_thumbnails(mols, start=None, stop=None):
                                     subImgSize=(200, 150),
                                     legends=legends)
     molcat.show_image(png_data)
+
+
+def print_props(mol):
+    props = mol.GetPropsAsDict()
+    key_len = max(len(k) for k in props.keys())
+    for k, v in props.items():
+        if isinstance(v, float):
+            v = f'{v:.3g}'
+        print(f'{k:{key_len}} | {v}')
+
+
+def set_prop(mol, cmd):
+    try:
+        d = tomllib.loads(cmd)
+    except tomllib.TOMLDecodeError:
+        raise ValueError(
+            "Syntax error: must be key=value; string values quoted.")
+    new_mol = Chem.Mol(mol)
+    for k, v in d.items():
+        if isinstance(v, int):
+            new_mol.SetIntProp(k, v)
+        elif isinstance(v, float):
+            new_mol.SetDoubleProp(k, v)
+        else:
+            # Stringify in case it's some other type such as list
+            new_mol.SetProp(k, str(v))
+    return new_mol
+
+
+def unset_prop(mol, prop):
+    if prop[0] in '"\'':
+        prop = ast.literal_eval(prop)
+    if not mol.HasProp(prop):
+        raise ValueError(f'Property "{prop}" does not exist')
+    new_mol = Chem.Mol(mol)
+    new_mol.ClearProp(prop)
+    return new_mol
 
 
 def get_writer(filename):
@@ -480,6 +545,7 @@ def write_mols(filename, mols):
     with get_writer(filename) as writer:
         for mol in mols:
             writer.write(mol)
+        print(f'Wrote {len(mols)} mols to {filename}')
 
 
 def main_loop(input_mols=None, filename=None):
@@ -487,12 +553,16 @@ def main_loop(input_mols=None, filename=None):
     history = []
     size = DEFAULT_SIZE
     draw = True
+    pos = 0
 
     while True:
         state = stack[-1]
         mol = state.mol
         if draw and mol.GetNumAtoms() > 0:
             molcat.show_mol(mol, size)
+        if state.pos != pos:
+            print_pos(state)
+        pos = state.pos
         draw = True
 
         try:
@@ -545,7 +615,6 @@ def main_loop(input_mols=None, filename=None):
             elif word in ('w', 'write'):  # write file
                 fname = rest or filename
                 write_mols(fname, state.mols)
-                print(f'Wrote {len(state)} mols to {fname}')
                 draw = False
             elif cmd in ('u', 'undo'):
                 if len(stack) > 1:
@@ -578,6 +647,21 @@ def main_loop(input_mols=None, filename=None):
             elif word.startswith('th'):
                 show_thumbnails(state.mols)
                 draw = False
+            elif word == 'props':
+                print_props(mol)
+                draw = False
+            elif word == 'set':
+                new_mol = set_prop(mol, rest)
+                new_mol = molcat.to_2d(new_mol, idx=1, cleanIt=False)
+                new_state = state.updateMol(new_mol)
+                stack.append(new_state)
+                draw = False
+            elif word == 'unset':
+                new_mol = unset_prop(mol, rest)
+                new_mol = molcat.to_2d(new_mol, idx=1, cleanIt=False)
+                new_state = state.updateMol(new_mol)
+                stack.append(new_state)
+                draw = False
             elif cmd.startswith(':'):
                 if new_state := range_cmd(cmd, state):
                     stack.append(new_state)
@@ -608,7 +692,8 @@ def get_mols(file_or_smiles):
                 for mol in molcat.get_reader(file_or_smiles, removeHs=True)
             ]
         else:
-            return [Chem.MolFromSmiles(file_or_smiles)]
+            mol = Chem.MolFromSmiles(file_or_smiles)
+            return [molcat.to_2d(mol, idx=1, cleanIt=False)]
     else:
         return [Chem.Mol()]
 
