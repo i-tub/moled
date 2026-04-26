@@ -13,7 +13,9 @@ Ghostty, or iTerm2.
 
 Sample session:
 
-![moled editing session](https://raw.githubusercontent.com/i-tub/moled/master/moled.png)
+<img alt="moled editing session"
+     src="https://raw.githubusercontent.com/i-tub/moled/master/moled.png"
+     width="454">
 
 ### Requirements
 
