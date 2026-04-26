@@ -15,7 +15,7 @@ Sample session:
 
 <img alt="moled editing session"
      src="https://raw.githubusercontent.com/i-tub/moled/master/moled.png"
-     width="454">
+     width="227">
 
 ### Requirements
 
