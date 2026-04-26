@@ -568,6 +568,7 @@ def get_writer(filename):
 def write_mols(filename, mols):
     with get_writer(filename) as writer:
         for mol in mols:
+            Chem.SanitizeMol(mol)
             writer.write(mol)
         print(f'Wrote {len(mols)} mols to {filename}')
 

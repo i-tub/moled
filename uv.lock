@@ -236,14 +236,14 @@ wheels = [
 
 [[package]]
 name = "molcat"
-version = "0.1.0"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "rdkit" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b1/c9/39ee699c686d2e35e652deefb87631adcfb0a72dfaac4eee2ea0df8dd45a/molcat-0.1.0.tar.gz", hash = "sha256:d5f3da6366bd00cc1231058603fa0f0adb3bedf01b2e860baa2f3eb74b2bcc16", size = 5954 }
+sdist = { url = "https://files.pythonhosted.org/packages/92/d1/e5a259b494e0735837e7f082a238773a70b2e05928ed55372051f060e0c5/molcat-0.2.0.tar.gz", hash = "sha256:71cb95cc3d3aea412f80f26f548cee617846af6b34cd06d54881739a6595d616", size = 6660 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/be/22cbc5a305320529ce4aeb9add3ca9e42bb515d1e619065c09abbbaabf87/molcat-0.1.0-py3-none-any.whl", hash = "sha256:4cacc2a9e97a1426254ef29727b09b36bf5b6ce21f8751717f9f3b3e9ca52f73", size = 6198 },
+    { url = "https://files.pythonhosted.org/packages/56/3e/8abdf4deed3bafa7f4fbeb3aee6a2220699a7fce8b906981216663faf7e0/molcat-0.2.0-py3-none-any.whl", hash = "sha256:82775813e46b6658eead206b36cdb19156cf1c8d5fde124745e90010bf58f5e2", size = 6943 },
 ]
 
 [[package]]
@@ -267,7 +267,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "molcat" },
+    { name = "molcat", specifier = ">=0.2.0" },
     { name = "rdkit" },
 ]
 
