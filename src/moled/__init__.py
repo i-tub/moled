@@ -218,6 +218,30 @@ class State:
         return State(new_mols, self.pos)
 
 
+class Write3D:
+    """
+    Decorate a MolWriter object by generating 3D coordinates on the fly.
+    """
+
+    def __init__(self, writer):
+        self.writer = writer
+
+    def __enter__(self):
+        self.writer.__enter__()
+        return self
+
+    def __exit__(self, *a):
+        return self.writer.__exit__(*a)
+
+    def write(self, mol):
+        from rdkit.Chem import rdDistGeom
+        mol3d = Chem.AddHs(mol)
+        params = rdDistGeom.ETKDGv3()
+        params.randomSeed = 42
+        rdDistGeom.EmbedMolecule(mol3d, params)
+        return self.writer.write(mol3d)
+
+
 def edit_bond(mol, a1, b, a2):
     a2 = int(a2) - 1
     bond_type = BOND_TYPES[b]
@@ -532,11 +556,11 @@ def get_writer(filename):
     elif filename.endswith('.csv'):
         return Chem.SmilesWriter(filename, delimiter=',')
     elif filename.endswith('.sdf') or filename.endswith('.mol'):
-        return Chem.SDWriter(filename)
+        return Write3D(Chem.SDWriter(filename))
     elif filename.endswith('.mae'):
-        return Chem.MaeWriter(filename)
+        return Write3D(Chem.MaeWriter(filename))
     elif filename.endswith('.maegz') or filename.endswith('.mae.gz'):
-        return Chem.MaeWriter(gzip.open(filename, 'w'))
+        return Write3D(Chem.MaeWriter(gzip.open(filename, 'w')))
     else:
         raise ValueError(f'Unknown file format for {filename}')
 
