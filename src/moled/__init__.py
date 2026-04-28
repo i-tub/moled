@@ -50,11 +50,11 @@ Comands
 Quit:
     quit # or q, or EOF (e.g., Ctrl-D)
 
-Add a SMILES to the current entry:
+Replace current entry with a SMILES
     CCO
 
 Print the current SMILES:
-    print  # or s
+    smiles  # or s
 
 Display the molecule, optionally without atom indices:
     display       # or d
@@ -83,6 +83,7 @@ Append or insert a chain:
     1-CCO
     1-CC=2
     2,4,6-Cl  # Append to multiple atoms at once
+    .CCO      # Add SMILES but don't connect it with current mol
 
 Attached via the first, and optionally via the last, atom(s) in the SMILES.
 
@@ -106,6 +107,17 @@ Delete atom:
 Delete fragment:
     1D  # All atoms reachable from atom 1
 
+Addresses
+---------
+
+We use an address syntax similar to that from ed and sed, but for molecules.
+Examples:
+    3   # third molecule
+    .   # current molecule
+    $   # last molecule
+    -1  # previous molecule
+    +2  # next molecule after next molecule
+
 File and entry commands
 -----------------------
 
@@ -116,10 +128,21 @@ Write a file:
     write myfile.sdf  # or w. Same formats as above.
 
 Go to next/prev/any structure:
-    next  # or n
-    prep  # or :p
+    next  # or n or -1
+    prev  # or p or +1
     42    # jump directly to 42nd structure (counting from 1)
     last  # or $. Jump to last structure.
+
+Create a new empty structure:
+    new
+
+Duplicate a structure (optionally takes an address):
+    dup    # duplicate current structure (same as `dup .`)
+    dup -1 # duplicate previous structure
+
+Merge in a structure (optionally takes an address):
+    merge    # merge the current structure into itself ("duplicate in place")
+    merge -1 # merge the previous structure into the current one
 
 List all entries in the file (SMILES and title):
     ls
@@ -129,8 +152,6 @@ Range commands
 
 These act in multiple entries at once. They all start with a colon.
 A range can be defined by one or two addresses, or '%' to mean all.
-The current entry is '.', and relative offsets may be specified
-with '+' or '-'.
 
     :%p       # print all entries (equivalent to ls)
     :%t       # show all thumbnails
@@ -355,14 +376,19 @@ def edit_atom_list(mol, atom_idcs, cmd_tail):
 
 
 def edit_mol(mol, cmd):
-    if frag := Chem.MolFromSmiles(cmd):
+    if new_mol := Chem.MolFromSmiles(cmd):
+        # Replace current mol with structure from SMILES
+        return Chem.RWMol(new_mol)
+
+    elif cmd.startswith('.'):
         # Append a SMILES without connecting it to anything
+        frag = Chem.MolFromSmiles(cmd[1:])
         new_mol = Chem.RWMol(mol)
         new_mol.InsertMol(frag)
         return new_mol
 
     # The remaining commands all start with a list of atoms:
-    if match := re.match(r'(\d+(?:,\d+)*)', cmd):
+    elif match := re.match(r'(\d+(?:,\d+)*)', cmd):
         csv_atoms = match.group(1)
         atom_idcs = [int(a) - 1 for a in csv_atoms.split(',')]
         cmd_tail = cmd[len(csv_atoms):]
@@ -390,6 +416,8 @@ def parse_addr(s, state):
         start = state.pos + int(start_str)
     else:
         start = int(start_str) - 1
+    if start < 0 or start >= len(state):
+        raise ValueError(f'Address out of bounds: {start + 1}')
     return start, s[len(start_str):]
 
 
@@ -438,6 +466,23 @@ def range_cmd(cmd, state):
     return None
 
 
+def dup_mol(state, addr):
+    print('dup_mol', addr)
+    idx, tail = parse_addr(addr or '.', state)
+    if tail:
+        raise ValueError("merge command takes a single address")
+    return Chem.RWMol(state.mols[idx])
+
+
+def merge_mol(state, addr):
+    idx, tail = parse_addr(addr or '.', state)
+    if tail:
+        raise ValueError("merge command takes a single address")
+    new_mol = Chem.RWMol(state.mol)
+    new_mol.InsertMol(state.mols[idx])
+    return new_mol
+
+
 def get_display_mol(mol):
     new_mol = Chem.Mol(mol)
     for atom in new_mol.GetAtoms():
@@ -475,6 +520,7 @@ def parse_args(argv=None):
 
 
 def to_smiles(mol) -> str:
+    mol = Chem.Mol(mol)
     Chem.SanitizeMol(mol)
     return Chem.MolToSmiles(mol)
 
@@ -619,18 +665,14 @@ def main_loop(input_mols=None, filename=None):
                 state.prev()
             elif cmd in ('$', 'last'):
                 state.last()
-            elif re.match(r'\d+$', cmd):
-                new_pos = int(cmd) - 1
+            elif re.match(r'[+-]?\d+$', cmd):
+                new_pos, _ = parse_addr(cmd, state)
                 state.goto(new_pos)
             elif cmd in ('new'):
                 new_state = state.insertMol(Chem.Mol())
                 stack.append(new_state)
             elif word == 'dup':
-                if rest:
-                    idx = int(rest) - 1
-                    new_mol = Chem.Mol(state.mols[idx])
-                else:
-                    new_mol = Chem.Mol(state.mol)
+                new_mol = dup_mol(state, rest)
                 new_state = state.insertMol(new_mol)
                 stack.append(new_state)
             elif word in ('r', 'read'):  # read file
@@ -692,6 +734,11 @@ def main_loop(input_mols=None, filename=None):
                     stack.append(new_state)
                 else:
                     draw = False
+            elif word == 'merge':
+                new_mol = merge_mol(state, rest)
+                new_mol = molcat.to_2d(new_mol, idx=1, cleanIt=False)
+                new_state = state.updateMol(new_mol)
+                stack.append(new_state)
             elif cmd:
                 if new_mol := edit_mol(mol, cmd):
                     new_mol = molcat.to_2d(new_mol, idx=1, cleanIt=False)
