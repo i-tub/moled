@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import readline  # noqa: F401
+import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -44,8 +45,15 @@ BOND_STEREO = {
 }
 
 HELP = """\
-Comands
-=======
+moled
+=====
+
+moled is a line-oriented molecule editor, with a command set inspired by ed's.
+It requires a terminal supporting the kitty graphics protocol, which is also
+supported by Ghostty, iTerm2, and others.
+
+Basic comands
+-------------
 
 Quit:
     quit # or q, or EOF (e.g., Ctrl-D)
@@ -619,6 +627,12 @@ def write_mols(filename, mols):
         print(f'Wrote {len(mols)} mols to {filename}')
 
 
+def show_help():
+    pager = os.environ.get('PAGER', 'less')
+    p = subprocess.Popen([pager], stdin=subprocess.PIPE, encoding='utf8')
+    p.communicate(input=HELP)
+
+
 def main_loop(input_mols=None, filename=None):
     stack = [State(input_mols or [], 0)]
     history = []
@@ -651,7 +665,7 @@ def main_loop(input_mols=None, filename=None):
             if cmd in ('q', 'quit'):
                 break
             elif cmd in ('h', 'help', '?'):
-                print(HELP)
+                show_help()
                 draw = False
             elif cmd in ('s', 'smiles'):
                 print(to_smiles(mol))
